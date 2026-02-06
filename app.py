@@ -172,47 +172,56 @@ st.markdown("""
 
 def prepare_image_for_canvas(
     image_rgb: np.ndarray, 
-    max_size: int = 800
+    max_width: int = 800
 ) -> Tuple[Image.Image, int, int]:
     """
     Prepara una imagen NumPy para usarla como fondo del canvas.
+    HARD FIX para Streamlit Cloud:
+    - Fuerza modo RGB (no RGBA)
+    - Redimensiona a máximo 800px de ancho
+    - Usa LANCZOS para mejor calidad
     """
     if not isinstance(image_rgb, np.ndarray):
         raise ValueError("La imagen debe ser un numpy array")
     
+    # Asegurar que sea RGB (3 canales)
     if len(image_rgb.shape) == 2:
+        # Escala de grises -> RGB
         image_rgb = cv2.cvtColor(image_rgb, cv2.COLOR_GRAY2RGB)
+    elif len(image_rgb.shape) == 3 and image_rgb.shape[2] == 4:
+        # RGBA -> RGB (quitar canal alpha)
+        image_rgb = image_rgb[:, :, :3]
     
-    original_height, original_width = image_rgb.shape[:2]
-    
-    if original_height > max_size or original_width > max_size:
-        scale = min(max_size / original_height, max_size / original_width)
-        new_width = int(original_width * scale)
-        new_height = int(original_height * scale)
-    else:
-        new_width = original_width
-        new_height = original_height
-    
+    # Asegurar uint8
     if image_rgb.dtype != np.uint8:
         if image_rgb.max() <= 1.0:
             image_rgb = (image_rgb * 255).astype(np.uint8)
         else:
             image_rgb = np.clip(image_rgb, 0, 255).astype(np.uint8)
     
-    if new_width != original_width or new_height != original_height:
-        image_rgb = cv2.resize(image_rgb, (new_width, new_height), interpolation=cv2.INTER_AREA)
-    
-    if len(image_rgb.shape) == 2:
-        image_rgb = cv2.cvtColor(image_rgb, cv2.COLOR_GRAY2RGB)
-    elif image_rgb.shape[2] == 4:
-        image_rgb = image_rgb[:, :, :3]
-    
+    # Crear imagen PIL en modo RGB
     pil_image = Image.fromarray(image_rgb, mode='RGB')
-    pil_image = pil_image.convert('RGBA')
     
-    actual_width, actual_height = pil_image.size
+    # REDIMENSIONADO AGRESIVO: máximo 800px de ancho
+    orig_width, orig_height = pil_image.size
     
-    return pil_image, actual_width, actual_height
+    if orig_width > max_width:
+        # Calcular nueva altura manteniendo proporción
+        ratio = max_width / orig_width
+        new_height = int(orig_height * ratio)
+        new_width = max_width
+        
+        # Redimensionar con LANCZOS (mejor calidad)
+        pil_image = pil_image.resize((new_width, new_height), Image.LANCZOS)
+    
+    # FORZAR RGB - El canvas falla con RGBA o P en Linux/Cloud
+    if pil_image.mode != "RGB":
+        pil_image = pil_image.convert("RGB")
+    
+    # Obtener dimensiones EXACTAS de la imagen final
+    final_width, final_height = pil_image.size
+    
+    return pil_image, final_width, final_height
 
 
 def detections_to_canvas_objects(
@@ -704,32 +713,47 @@ def main():
         else:
             st.info(f"✏️ **Modo Dibujar Reparos**: Click para marcar '{st.session_state.landmark_type}'.")
     
-    # Preparar imagen para canvas (con manejo robusto de errores para Streamlit Cloud)
+    # ============================================================
+    # HARD FIX PARA STREAMLIT CLOUD
+    # ============================================================
     try:
         # Validar que la imagen existe y no está vacía
         if display_image_rgb is None or display_image_rgb.size == 0:
             raise ValueError("La imagen a mostrar está vacía")
         
-        # Preparar imagen para canvas
+        # Preparar imagen para canvas (máximo 800px ancho, modo RGB forzado)
         pil_background, canvas_width, canvas_height = prepare_image_for_canvas(
             display_image_rgb, 
-            max_size=800
+            max_width=800
         )
         
-        # VERIFICACIÓN CRÍTICA: Asegurar que la imagen PIL es válida y no vacía
+        # VERIFICACIÓN: imagen PIL válida
         if pil_background is None:
-            raise ValueError("No se pudo crear la imagen PIL para el canvas")
+            raise ValueError("No se pudo crear la imagen PIL")
         
         if pil_background.size[0] == 0 or pil_background.size[1] == 0:
-            raise ValueError(f"La imagen PIL tiene dimensiones inválidas: {pil_background.size}")
+            raise ValueError(f"Dimensiones inválidas: {pil_background.size}")
         
-        # Crear una copia fresca de la imagen PIL para el canvas
-        # Esto evita problemas de punteros en Streamlit Cloud
-        pil_background_fresh = pil_background.copy()
+        # FORZAR RGB - Crítico para Linux/Cloud
+        if pil_background.mode != "RGB":
+            pil_background = pil_background.convert("RGB")
         
+        # Las dimensiones del canvas DEBEN coincidir EXACTAMENTE con la imagen
+        exact_width, exact_height = pil_background.size
+        
+        # ============================================================
+        # DEBUG VISUAL - Ver si la imagen se carga correctamente
+        # Si ves esta imagen pero no el canvas, el problema es el canvas
+        # Si no ves esta imagen, el problema es la carga
+        # ============================================================
+        with st.expander("🔍 DEBUG: Vista previa de imagen (expandir para verificar)", expanded=False):
+            st.image(pil_background, caption=f"Imagen cargada: {exact_width}x{exact_height}px, Modo: {pil_background.mode}", use_container_width=True)
+            st.caption("✅ Si ves la imagen aquí, la carga funciona correctamente.")
+        
+        # Calcular escalas
         original_height, original_width = st.session_state.image.shape[:2]
-        scale_x = canvas_width / original_width
-        scale_y = canvas_height / original_height
+        scale_x = exact_width / original_width
+        scale_y = exact_height / original_height
         
         # ============================================================
         # PREPARAR OBJETOS INICIALES (detecciones + landmarks)
@@ -756,12 +780,12 @@ def main():
             initial_drawing = {"version": "4.4.0", "objects": canvas_objects}
         
         # ============================================================
-        # DETERMINAR DRAWING_MODE SEGÚN MOUSE_MODE
+        # DETERMINAR DRAWING_MODE
         # ============================================================
         if st.session_state.mouse_mode == 'transform':
             drawing_mode = "transform"
         else:
-            drawing_mode = st.session_state.drawing_tool  # rect o circle
+            drawing_mode = st.session_state.drawing_tool
         
         # Colores según herramienta
         if st.session_state.drawing_tool == "rect":
@@ -777,25 +801,25 @@ def main():
             fill_color = stroke_color
         
         # ============================================================
-        # CANVAS CON KEY DINÁMICA (fuerza re-render)
+        # CANVAS - Dimensiones EXACTAS de la imagen PIL
         # ============================================================
         canvas_result = st_canvas(
             fill_color=fill_color,
             stroke_width=2,
             stroke_color=stroke_color,
-            background_image=pil_background_fresh,  # Usar copia fresca
+            background_image=pil_background,  # Imagen RGB directa
             update_streamlit=True,
-            height=canvas_height,
-            width=canvas_width,
+            height=exact_height,  # EXACTO de la imagen
+            width=exact_width,    # EXACTO de la imagen
             drawing_mode=drawing_mode,
             point_display_radius=10 if st.session_state.drawing_tool == "circle" else 0,
-            key=f"canvas_{st.session_state.canvas_key}",  # KEY DINÁMICA
+            key=f"canvas_{st.session_state.canvas_key}",
             initial_drawing=initial_drawing,
             display_toolbar=True
         )
         
         # Info del canvas
-        st.caption(f"📐 {canvas_width}x{canvas_height}px | Modo: {drawing_mode.upper()} | Objetos: {len(canvas_objects)}")
+        st.caption(f"📐 {exact_width}x{exact_height}px | Modo: {drawing_mode.upper()} | Objetos: {len(canvas_objects)}")
         
         # ============================================================
         # BOTÓN GUARDAR CAMBIOS
