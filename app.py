@@ -532,16 +532,28 @@ def main():
         
         if uploaded_file is not None:
             try:
-                image_bgr = load_image(uploaded_file)
-                st.session_state.image = image_bgr
-                st.session_state.image_rgb = bgr_to_rgb(image_bgr)
-                st.success(f"✅ {uploaded_file.name}")
+                # Cargar imagen con optimización para Streamlit Cloud
+                image_bgr = load_image(uploaded_file, max_dimension=1200)
                 
+                # Validar que la imagen se cargó correctamente
+                if image_bgr is None or image_bgr.size == 0:
+                    raise ValueError("La imagen cargada está vacía")
+                
+                # Guardar en session_state
+                st.session_state.image = image_bgr.copy()  # Copia para evitar referencias
+                st.session_state.image_rgb = bgr_to_rgb(image_bgr)
+                
+                # Mostrar info de la imagen
+                h, w = image_bgr.shape[:2]
+                st.success(f"✅ {uploaded_file.name} ({w}x{h}px)")
+                
+                # Inicializar detector si no existe
                 if st.session_state.detector is None:
                     st.session_state.detector = ToothDetector(None)
                     
             except Exception as e:
-                st.error(f"Error: {str(e)}")
+                st.error(f"❌ Error al cargar imagen: {str(e)}")
+                st.info("💡 Intente con otro archivo o formato (JPG, PNG, PDF)")
         
         st.divider()
         
@@ -692,12 +704,28 @@ def main():
         else:
             st.info(f"✏️ **Modo Dibujar Reparos**: Click para marcar '{st.session_state.landmark_type}'.")
     
-    # Preparar imagen para canvas
+    # Preparar imagen para canvas (con manejo robusto de errores para Streamlit Cloud)
     try:
+        # Validar que la imagen existe y no está vacía
+        if display_image_rgb is None or display_image_rgb.size == 0:
+            raise ValueError("La imagen a mostrar está vacía")
+        
+        # Preparar imagen para canvas
         pil_background, canvas_width, canvas_height = prepare_image_for_canvas(
             display_image_rgb, 
             max_size=800
         )
+        
+        # VERIFICACIÓN CRÍTICA: Asegurar que la imagen PIL es válida y no vacía
+        if pil_background is None:
+            raise ValueError("No se pudo crear la imagen PIL para el canvas")
+        
+        if pil_background.size[0] == 0 or pil_background.size[1] == 0:
+            raise ValueError(f"La imagen PIL tiene dimensiones inválidas: {pil_background.size}")
+        
+        # Crear una copia fresca de la imagen PIL para el canvas
+        # Esto evita problemas de punteros en Streamlit Cloud
+        pil_background_fresh = pil_background.copy()
         
         original_height, original_width = st.session_state.image.shape[:2]
         scale_x = canvas_width / original_width
@@ -755,7 +783,7 @@ def main():
             fill_color=fill_color,
             stroke_width=2,
             stroke_color=stroke_color,
-            background_image=pil_background,
+            background_image=pil_background_fresh,  # Usar copia fresca
             update_streamlit=True,
             height=canvas_height,
             width=canvas_width,
@@ -797,8 +825,13 @@ def main():
             st.info(f"📊 Estado actual: {num_det} dientes, {num_lm} reparos")
         
     except Exception as e:
-        st.error(f"Error al renderizar canvas: {e}")
-        st.image(display_image_rgb, use_container_width=True)
+        st.error(f"❌ Error al renderizar canvas: {e}")
+        st.warning(f"**Detalles técnicos:** {type(e).__name__}: {str(e)}")
+        st.info("💡 Mostrando imagen estática como alternativa. Si el problema persiste, verifique las dependencias.")
+        
+        # Mostrar imagen estática como fallback
+        if display_image_rgb is not None and display_image_rgb.size > 0:
+            st.image(display_image_rgb, use_container_width=True, caption="Vista estática (canvas no disponible)")
     
     # ==================== CALIBRACIÓN ====================
     if not st.session_state.calibration.calibrated and st.session_state.detections:

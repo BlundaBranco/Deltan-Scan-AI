@@ -63,18 +63,28 @@ def pdf_to_image(pdf_file) -> np.ndarray:
         raise Exception(f"Error al convertir PDF a imagen: {str(e)}")
 
 
-def load_image(file) -> np.ndarray:
+def load_image(file, max_dimension: int = 1200) -> np.ndarray:
     """
     Carga una imagen desde un archivo (JPG, PNG) o convierte PDF.
+    Optimizada para Streamlit Cloud - evita problemas de memoria y punteros.
     
     Args:
-        file: Archivo cargado por Streamlit
+        file: Archivo cargado por Streamlit (st.file_uploader)
+        max_dimension: Dimensión máxima (ancho o alto) para redimensionar. Default 1200px.
         
     Returns:
         np.ndarray: Imagen en formato BGR (OpenCV), uint8, rango 0-255
+        
+    Raises:
+        ValueError: Si no se puede decodificar la imagen
     """
-    # Leer el archivo como bytes
+    # CRÍTICO: Leer todos los bytes inmediatamente para evitar problemas de puntero
+    # en Streamlit Cloud (el file object puede cerrarse)
+    file.seek(0)  # Asegurar que estamos al inicio del archivo
     file_bytes = file.read()
+    
+    if not file_bytes or len(file_bytes) == 0:
+        raise ValueError("El archivo está vacío o no se pudo leer")
     
     # Detectar tipo de archivo
     file_extension = file.name.lower().split('.')[-1]
@@ -82,20 +92,37 @@ def load_image(file) -> np.ndarray:
     if file_extension == 'pdf':
         # Convertir PDF usando BytesIO
         pdf_file = BytesIO(file_bytes)
-        return pdf_to_image(pdf_file)
+        img = pdf_to_image(pdf_file)
     else:
-        # Convertir bytes a numpy array
-        nparr = np.frombuffer(file_bytes, np.uint8)
+        # Convertir bytes a numpy array INMEDIATAMENTE
+        nparr = np.frombuffer(file_bytes, dtype=np.uint8)
+        
+        if nparr.size == 0:
+            raise ValueError("No se pudieron leer los bytes de la imagen")
+        
         # Decodificar imagen
         img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+        
         if img is None:
-            raise ValueError(f"No se pudo decodificar la imagen {file.name}")
-        
-        # Asegurar formato correcto
-        if img.dtype != np.uint8:
-            img = img.astype(np.uint8)
-        
-        return img
+            raise ValueError(f"No se pudo decodificar la imagen '{file.name}'. Formato no soportado o archivo corrupto.")
+    
+    # Validar que la imagen no esté vacía
+    if img is None or img.size == 0:
+        raise ValueError("La imagen decodificada está vacía")
+    
+    # Asegurar formato uint8
+    if img.dtype != np.uint8:
+        img = np.clip(img, 0, 255).astype(np.uint8)
+    
+    # OPTIMIZACIÓN: Redimensionar si es muy grande para evitar problemas de memoria
+    height, width = img.shape[:2]
+    if width > max_dimension or height > max_dimension:
+        scale = min(max_dimension / width, max_dimension / height)
+        new_width = int(width * scale)
+        new_height = int(height * scale)
+        img = cv2.resize(img, (new_width, new_height), interpolation=cv2.INTER_AREA)
+    
+    return img
 
 
 def numpy_to_pil_rgba(
